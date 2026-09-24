@@ -1,0 +1,69 @@
+model_profile_id: metaunit_gap_psi_only
+version: "1.0"
+domain: photonics
+description: Mock metaunit profile for phase-sweep style designs.
+backend:
+  type: mock
+  model_artifact:
+    kind: none
+    path_env: null
+    companion_paths_env: []
+  output_dir_env: EM_MCP_OUTPUT_DIR
+mock_generation:
+  sweep:
+    start_field: l_min_nm
+    stop_field: l_max_nm
+    default_start: 0
+    default_stop_offset: 10
+    max_points: 7
+compatible_problem_families:
+  - metaunit
+design_schema:
+  type: object
+  required:
+    - shape
+    - material
+    - P_nm
+    - H_nm
+    - l_min_nm
+    - l_max_nm
+  properties:
+    shape:
+      type: string
+      enum: [pillar, block, cross]
+    material:
+      type: string
+      enum: [GaP, c-Si, TiO2]
+    P_nm:
+      type: number
+      exclusiveMinimum: 0
+    H_nm:
+      type: number
+      exclusiveMinimum: 0
+    l_min_nm:
+      type: number
+      exclusiveMinimum: 0
+    l_max_nm:
+      type: number
+      exclusiveMinimum: 0
+  additionalProperties: false
+model_bindings:
+  parameters:
+    P_nm: P
+    H_nm: H
+    l_min_nm: l_min
+    l_max_nm: l_max
+  tags:
+    study: study_sweep
+    export: export_table
+  selections:
+    geometry: geometry_main
+  outputs:
+    data_by_lam: data_by_lam
+output_schema:
+  type: object
+  required:
+    - data_by_lam
+  properties:
+    data_by_lam:
+      type: object

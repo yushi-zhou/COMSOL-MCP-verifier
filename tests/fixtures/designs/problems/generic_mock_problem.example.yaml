@@ -1,0 +1,34 @@
+problem_id: generic_mock_problem
+version: "1.0"
+family: generic
+difficulty: easy
+description: Generic mock problem that uses a non-metaunit candidate schema.
+compatible_model_profiles:
+  - generic_mock_profile
+independent_variables:
+  frequency_hz: [1000000000.0, 1200000000.0]
+objectives:
+  - metric: score
+    direction: maximize
+    target: 1.0
+    weight: 1.0
+constraints:
+  - constraint_id: width_bounds
+    type: field_comparison
+    left:
+      field: width_nm
+    operator: ">="
+    right:
+      const: 40
+    message: width_nm must be at least 40 nm.
+  - constraint_id: gap_bounds
+    type: field_comparison
+    left:
+      field: gap_nm
+    operator: in
+    right:
+      const: [0, 5, 10, 15, 20]
+    message: gap_nm must be one of the allowed discrete values.
+verifier_id: mock_generic_verifier
+expected_outputs:
+  - summary_metrics

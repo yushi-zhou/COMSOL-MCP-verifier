@@ -1,0 +1,42 @@
+problem_id: metaunit_phase_coverage
+version: "1.0"
+family: metaunit
+difficulty: hard
+description: Mock metaunit problem focused on phase coverage and transmission.
+compatible_model_profiles:
+  - metaunit_gap_psi_only
+  - metaunit_csi_psi_only
+  - metaunit_gap_psi_only_livelink
+  - metaunit_csi_psi_only_livelink
+independent_variables:
+  wavelength_nm: [750]
+objectives:
+  - metric: phase_coverage
+    direction: maximize
+    target: 6.283185307179586
+    weight: 1.0
+  - metric: mean_transmission
+    direction: maximize
+    target: 0.75
+    weight: 0.5
+constraints:
+  - constraint_id: positive_dimensions
+    type: field_comparison
+    left:
+      field: H_nm
+    operator: ">"
+    right:
+      const: 0
+    message: H_nm must be positive.
+  - constraint_id: inside_period
+    type: field_comparison
+    left:
+      field: l_max_nm
+    operator: "<="
+    right:
+      field: P_nm
+      offset: -5
+    message: l_max_nm must be <= P_nm - 5.
+verifier_id: mock_metaunit_phase_sweep
+expected_outputs:
+  - data_by_lam

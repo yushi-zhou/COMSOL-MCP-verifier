@@ -1,0 +1,45 @@
+name: COMSOL-free checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.10'
+          - os: ubuntu-latest
+            python: '3.14'
+          - os: windows-latest
+            python: '3.12'
+    env:
+      EM_DESIGN_PACKAGE_ROOTS: ${{ github.workspace }}/tests/fixtures/designs
+      EM_DESIGN_MCP_RUNS_DIR: ${{ github.workspace }}/runs/ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install from source
+        run: python -m pip install -e ".[test]"
+      - name: Check dependencies
+        run: python -m pip check
+      - name: Test without commercial solvers
+        run: python -m pytest -q
+      - name: Exercise the documented mock request
+        run: python -m em_design_mcp.cli run-json --input tests/fixtures/mock-request.json --output runs/ci/response.json --pretty
+      - name: Verify the CLI result
+        run: python -c "import json; from pathlib import Path; r=json.loads(Path('runs/ci/response.json').read_text()); assert r['schema_version']=='em_design_mcp_cli_v1' and r['ok']; assert r['result']['status']=='evaluated' and r['result']['overall_pass']"

@@ -1,0 +1,33 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+.env
+/.env.*
+!/.env.example
+/.mcp.json
+/.codex/config.toml
+/scratch/
+/tmp/
+/pytest-cache-files-*/
+/pytest_full_*/
+/pytest_tmp_*/
+# Engine matlab/ holds only the generic LiveLink entrypoint; model-specific
+# builders/helpers belong in design packages, not here.
+/matlab/*
+!/matlab/run_em_design_from_json.m
+!/matlab/em_model_facts.m
+!/matlab/em_named_measurements.m
+!/matlab/README.md
+/runs/
+# Keep the Python runs module; ignore runtime artifacts in test packages.
+/tests/fixtures/designs/**/runs/
+*.mph
+*.mphbin
+*.mph.lock
+*.mphstatus
+*.log

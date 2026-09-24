@@ -1,0 +1,21 @@
+schema_version: em_design_package_v1
+package_id: test-fixtures
+description: Repository-local deterministic contracts for core tests.
+profiles:
+  - profiles/*.yaml
+problems:
+  - problems/*.yaml
+plugins:
+  verifiers:
+    mock_generic_verifier:
+      path: plugins/mock_generic_verifier.py
+      callable: verify
+      version: "0.1"
+      description: Generic deterministic mock verifier.
+      required_outputs: [summary_metrics]
+    mock_metaunit_phase_sweep:
+      path: plugins/mock_metaunit_phase_sweep_verifier.py
+      callable: verify
+      version: "0.1"
+      description: Deterministic phase-sweep mock verifier.
+      required_outputs: [data_by_lam]

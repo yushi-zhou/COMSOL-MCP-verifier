@@ -1,0 +1,28 @@
+problem_id: metaunit_broadband_transmission
+version: "1.0"
+family: metaunit
+difficulty: medium
+description: Mock metaunit problem with multiple wavelengths.
+compatible_model_profiles:
+  - metaunit_gap_psi_only
+  - metaunit_csi_psi_only
+  - metaunit_gap_psi_only_livelink
+independent_variables:
+  wavelength_nm: [700, 750, 800, 850]
+objectives:
+  - metric: mean_transmission
+    direction: maximize
+    target: 0.7
+    weight: 1.0
+constraints:
+  - constraint_id: sweep_order
+    type: field_comparison
+    left:
+      field: l_min_nm
+    operator: "<"
+    right:
+      field: l_max_nm
+    message: l_min_nm must be smaller than l_max_nm.
+verifier_id: mock_metaunit_phase_sweep
+expected_outputs:
+  - data_by_lam

@@ -1,0 +1,50 @@
+model_profile_id: generic_mock_profile
+version: "1.0"
+domain: electromagnetics
+description: Generic mock profile with a different candidate schema.
+backend:
+  type: mock
+  model_artifact:
+    kind: none
+    path_env: null
+    companion_paths_env: []
+  output_dir_env: EM_MCP_OUTPUT_DIR
+compatible_problem_families:
+  - generic
+design_schema:
+  type: object
+  required:
+    - width_nm
+    - gap_nm
+    - length_um
+  properties:
+    width_nm:
+      type: number
+      exclusiveMinimum: 0
+    gap_nm:
+      type: number
+      minimum: 0
+    length_um:
+      type: number
+      exclusiveMinimum: 0
+    material:
+      type: string
+  additionalProperties: false
+model_bindings:
+  parameters:
+    width_nm: width
+    gap_nm: gap
+    length_um: length
+  tags:
+    study: study_generic
+  selections:
+    geometry: generic_geometry
+  outputs:
+    summary_metrics: summary_metrics
+output_schema:
+  type: object
+  required:
+    - summary_metrics
+  properties:
+    summary_metrics:
+      type: object

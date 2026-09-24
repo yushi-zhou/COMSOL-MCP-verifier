@@ -1,0 +1,7 @@
+{
+  "tool": "evaluate_candidate",
+  "model_profile_id": "generic_mock_profile",
+  "problem_id": "generic_mock_problem",
+  "backend": "mock",
+  "candidate": {"width_nm": 80, "gap_nm": 10, "length_um": 2.5}
+}

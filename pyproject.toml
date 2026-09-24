@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "em-design-mcp"
+version = "0.2.0"
+description = "Verification-first, contract-bounded COMSOL workflows for coding agents"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+keywords = ["comsol", "simulation", "verification", "mcp", "scientific-computing"]
+classifiers = [
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = [
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "mcp[cli]>=1.0.0,<2.0.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+report = ["Pillow>=10.0"]
+
+[project.urls]
+Repository = "https://github.com/yushi-zhou/comsol-mcp-verifier"
+Documentation = "https://github.com/yushi-zhou/comsol-mcp-verifier/tree/main/docs"
+Issues = "https://github.com/yushi-zhou/comsol-mcp-verifier/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

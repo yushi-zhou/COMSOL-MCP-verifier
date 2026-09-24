@@ -1,0 +1,4 @@
+interface:
+  display_name: "EM Simulation Agent"
+  short_description: "Run contract-bounded COMSOL design jobs with compact iteration."
+  default_prompt: "Use $em-simulation to inspect a design contract, run COMSOL, and iterate from verifier feedback."
