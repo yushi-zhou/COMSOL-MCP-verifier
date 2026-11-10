@@ -17,7 +17,12 @@ from ..utils.provenance import capture_provenance, compact_provenance, file_sha2
 from ..schemas.model_observation import selected_measurements
 from ..validation.physics_preflight import check_topics
 from ..utils.run_ids import make_run_id
-from ..validation.compatibility import check_profile_problem_compatibility
+from ..validation.compatibility import (
+    backend_compatibility_errors,
+    check_profile_problem_compatibility,
+    model_binding_errors,
+    problem_contract_errors,
+)
 from ..validation.constraint_validation import validate_constraints
 from ..validation.schema_validation import deep_merge_schema, validate_against_schema
 
@@ -83,6 +88,7 @@ def validate_candidate_payload(model_profile_id: str, problem_id: str, candidate
             selected_measurements(profile)
         except ValueError as exc:
             errors.append(str(exc))
+        errors.extend(problem_contract_errors(problem))
         verifier_required_outputs: list[str] | None = None
         verifier_id = str(problem.get("verifier_id", "")).strip()
         if verifier_id:
@@ -105,17 +111,20 @@ def validate_candidate_payload(model_profile_id: str, problem_id: str, candidate
         schema_valid, schema_errors, normalized_candidate = validate_against_schema(candidate, applied_schema)
         if not schema_valid:
             errors.extend(schema_errors)
+        if (profile.get("backend") or {}).get("type") == "matlab_livelink":
+            errors.extend(model_binding_errors(profile, applied_schema, normalized_candidate))
 
         applied_constraints = list(problem.get("constraints", []))
         if schema_valid:
-            constraint_result = validate_constraints(candidate, applied_constraints)
+            # Constraints see the same values (defaults included) that the run applies.
+            constraint_result = validate_constraints(normalized_candidate, applied_constraints)
             errors.extend(constraint_result.errors)
             warnings.extend(constraint_result.warnings)
 
             if verifier_entry is not None:
                 precheck_constraints = getattr(verifier_entry, "precheck_constraints", None)
                 if precheck_constraints:
-                    precheck = validate_constraints(candidate, precheck_constraints)
+                    precheck = validate_constraints(normalized_candidate, precheck_constraints)
                     errors.extend(precheck.errors)
                     warnings.extend(precheck.warnings)
 
@@ -161,11 +170,12 @@ def estimate_candidate_cost_payload(model_profile_id: str, problem_id: str, cand
         }
 
     cost_estimate = estimate_cost_from_policy(profile, problem, normalized_candidate, backend=backend)
+    backend_errors = backend_compatibility_errors(profile, backend)
     return {
         **cost_estimate,
-        "valid": bool(validation["valid"] and cost_estimate["valid"]),
+        "valid": bool(validation["valid"] and cost_estimate["valid"] and not backend_errors),
         "warnings": warnings + list(cost_estimate["warnings"]),
-        "errors": errors + list(cost_estimate["errors"]),
+        "errors": errors + backend_errors + list(cost_estimate["errors"]),
         "validation": validation,
     }
 
@@ -208,6 +218,23 @@ def evaluate_candidate_payload(
     problem = problems.as_dict(problem_id)
     verifier_entry = verifiers.get(problem["verifier_id"])
     run_id = run_id_override or make_run_id(model_profile_id, problem_id, backend, candidate)
+    backend_errors = backend_compatibility_errors(profile, backend)
+    if backend_errors:
+        return {
+            "run_id": run_id,
+            "backend": backend,
+            "valid": False,
+            "overall_pass": False,
+            "status": "validation_failed",
+            "failure_category": "backend_incompatible",
+            "verifier_id": None,
+            "candidate": normalized_candidate,
+            "simulation_output": {},
+            "verifier_result": {},
+            "validation": validation,
+            "warnings": validation["warnings"],
+            "errors": validation["errors"] + backend_errors,
+        }
     cost_estimate: dict[str, Any] | None = None
     if str(backend).strip() == "matlab_livelink":
         cost_estimate = estimate_cost_from_policy(profile, problem, normalized_candidate, backend=backend)
@@ -295,14 +322,73 @@ def evaluate_candidate_payload(
             "errors": validation["errors"] + [str(exc)],
         }
         return _finalize_result(result, profile, problem, verifier_version=verifier_entry.version)
-    verifier_result = verifier_entry.verify(problem, profile, normalized_candidate, simulation_output)
+    except Exception as exc:  # Parser/adapter bugs must still leave a truthful, final record.
+        result = {
+            "run_id": run_id,
+            "backend": backend,
+            "valid": True,
+            "overall_pass": False,
+            "status": "backend_failed",
+            "failure_category": "backend_internal_error",
+            "verifier_id": problem.get("verifier_id"),
+            "candidate": normalized_candidate,
+            "simulation_output": {},
+            "verifier_result": {},
+            "validation": validation,
+            "cost_estimate": cost_estimate,
+            "provenance": provenance,
+            "warnings": list(validation["warnings"]),
+            "errors": validation["errors"] + [f"{type(exc).__name__}: {exc}"],
+        }
+        return _finalize_result(result, profile, problem, verifier_version=verifier_entry.version)
+    backend_warnings = list(getattr(backend_runner, "warnings", []) or [])
+    try:
+        verifier_result = verifier_entry.verify(problem, profile, normalized_candidate, simulation_output)
+        verifier_problem = _verifier_result_problem(verifier_result)
+    except Exception as exc:  # A crashing verifier is not a verdict on the candidate.
+        verifier_result, verifier_problem = {}, f"Verifier raised {type(exc).__name__}: {exc}"
     try:
         require_provenance(provenance, capture_provenance(profile, problem, verifiers.packages))
     except BackendError as exc:
-        return {"run_id": run_id, "status": "stale_provenance", "overall_pass": False, "provenance": provenance,
-                "failure_category": exc.failure_category, "errors": [str(exc)], "simulation_output": simulation_output}
-    overall_pass = bool(verifier_result.get("overall_pass"))
-    backend_warnings = getattr(backend_runner, "warnings", [])
+        result = {
+            "run_id": run_id,
+            "backend": backend,
+            "valid": True,
+            "overall_pass": False,
+            "status": "stale_provenance",
+            "failure_category": exc.failure_category,
+            "verifier_id": problem.get("verifier_id"),
+            "candidate": normalized_candidate,
+            "provenance": provenance,
+            "simulation_output": simulation_output,
+            "verifier_result": {},
+            "validation": validation,
+            "cost_estimate": cost_estimate,
+            "warnings": validation["warnings"] + backend_warnings,
+            "errors": validation["errors"] + [str(exc)],
+        }
+        return _finalize_result(result, profile, problem, verifier_version=verifier_entry.version)
+    if verifier_problem:
+        result = {
+            "run_id": run_id,
+            "backend": backend,
+            "valid": True,
+            "overall_pass": False,
+            "status": "verifier_failed",
+            "failure_category": "verifier_error",
+            "verifier_id": problem.get("verifier_id"),
+            "candidate": normalized_candidate,
+            "provenance": provenance,
+            "simulation_output": simulation_output,
+            "verifier_result": verifier_result if isinstance(verifier_result, dict) else {},
+            "validation": validation,
+            "cost_estimate": cost_estimate,
+            "warnings": validation["warnings"] + backend_warnings,
+            "errors": validation["errors"] + [verifier_problem],
+        }
+        return _finalize_result(result, profile, problem, verifier_version=verifier_entry.version)
+    overall_pass = _verdict(verifier_result.get("overall_pass"))
+    verifier_result["overall_pass"] = overall_pass
     result = {
         "run_id": run_id,
         "backend": backend,
@@ -321,6 +407,23 @@ def evaluate_candidate_payload(
         "errors": validation["errors"] + ([verifier_result.get("failure_reason")] if not overall_pass and verifier_result.get("failure_reason") else []),
     }
     return _finalize_result(result, profile, problem, verifier_version=verifier_entry.version)
+
+
+def _verdict(value: Any) -> bool | None:
+    """Only a real boolean is a verdict; ``"false"`` must never count as a pass."""
+    if isinstance(value, bool):
+        return value
+    if type(value).__module__ == "numpy" and type(value).__name__ in {"bool_", "bool"}:
+        return bool(value)
+    return None
+
+
+def _verifier_result_problem(verifier_result: Any) -> str | None:
+    if not isinstance(verifier_result, dict):
+        return f"Verifier returned {type(verifier_result).__name__}, not an object."
+    if _verdict(verifier_result.get("overall_pass")) is None:
+        return f"Verifier result overall_pass must be true or false, not {verifier_result.get('overall_pass')!r}."
+    return None
 
 
 def classify_failure_payload(error_message_or_result: Any) -> dict[str, Any]:

@@ -17,7 +17,9 @@ synthetic values. They are not validated electromagnetic models.
 | Package discovery, contracts, validation | `test_package_registries.py`, `test_registry_loading.py`, `test_schema_driven_candidate_validation.py`, `test_constraint_validation.py`, `test_compatibility_rules.py` | Physical adequacy of external contracts |
 | Policy and stable CLI | `test_execution_policy.py`, `test_cli.py`, `test_server_surface.py` | Resource prediction or global scheduling quotas |
 | Deterministic mock and parser behavior | `test_mock_backend_determinism.py`, `test_comsol_table_parser.py` | Accuracy of any real simulation |
-| Actual Python worker subprocesses | `test_agent_jobs.py` | COMSOL cancellation, crash recovery, or solver progress reporting |
+| Actual Python worker subprocesses, locking, queueing, non-blocking waits | `test_agent_jobs.py` | COMSOL cancellation, crash recovery, or solver progress reporting |
+| Contract enforcement and truthful failure records | `test_contract_enforcement.py` | Physical adequacy of a contract's bindings |
+| Process-tree timeout handling | `test_process_tree.py` | Behavior of a real MATLAB/COMSOL installation |
 | Fingerprints and stale evidence rejection | `test_provenance.py` | Undeclared dependency tracking or reproducible software/hardware environments |
 | Fact checks, bindings, compaction | `test_model_observation.py` | Complete COMSOL property coverage or general physics correctness |
 | LiveLink adapter handling | `test_matlab_livelink_backend.py` | A successful real MATLAB invocation; subprocess responses are mocked |

@@ -1,25 +1,36 @@
 from __future__ import annotations
 
+import functools
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+import anyio
 
 from ..registries.model_profile_registry import ModelProfileRegistry
 from ..registries.package_registry import PackageRegistry
 from ..registries.problem_spec_registry import ProblemSpecRegistry
+from ..utils.file_lock import exclusive_file_lock
 from ..utils.paths import DESIGN_PACKAGE_ROOTS_ENV, RUNS_DIR_ENV, configured_run_root, configured_runs_dir
+from ..utils.process_tree import terminate_process_tree
 from ..utils.provenance import capture_provenance, compact_provenance, file_sha256, require_provenance
 from ..schemas.model_observation import selected_measurements, validate_topics
 
 
 TERMINAL_STATUSES = {"evaluated", "verifier_failed", "validation_failed", "policy_failed", "backend_failed", "backend_not_implemented", "cancelled", "worker_failed", "inspected", "preflight_failed", "stale_provenance"}
+MAX_WAIT_SECONDS = 55.0
+POLL_SECONDS = 0.25
+STATE_LOCK_TIMEOUT_SECONDS = 30.0
+# Windows refuses to replace or open a file while another handle (a polling
+# reader, an indexer, antivirus) has it open; such sharing violations are brief.
+SHARING_RETRY_ATTEMPTS = 40
+SHARING_RETRY_DELAY_SECONDS = 0.05
 
 
 class JobStore:
@@ -159,47 +170,54 @@ class JobStore:
     ) -> dict[str, Any]:
         job_dir = self._find_job_dir(job_id)
         state_path = job_dir / "state.json"
-        deadline = time.monotonic() + max(0.0, min(float(wait_seconds), 55.0))
+        deadline = time.monotonic() + _bounded_wait(wait_seconds)
         state = _read_json(state_path)
-        while (
-            int(state.get("revision") or 0) <= int(after_revision)
-            and state.get("status") not in TERMINAL_STATUSES
-            and time.monotonic() < deadline
-        ):
-            time.sleep(min(0.25, max(0.01, deadline - time.monotonic())))
+        while _should_wait(state, after_revision) and time.monotonic() < deadline:
+            time.sleep(min(POLL_SECONDS, max(0.01, deadline - time.monotonic())))
             state = _read_json(state_path)
         return _compact_job(job_dir, state, include_result=include_result)
+
+    async def wait(
+        self,
+        job_id: str,
+        *,
+        wait_seconds: float = 0.0,
+        after_revision: int = 0,
+        include_result: bool = False,
+    ) -> dict[str, Any]:
+        """Long-poll without blocking the MCP event loop; file I/O runs in threads."""
+        job_dir = await anyio.to_thread.run_sync(self._find_job_dir, job_id)
+        state_path = job_dir / "state.json"
+        deadline = time.monotonic() + _bounded_wait(wait_seconds)
+        state = await anyio.to_thread.run_sync(_read_json, state_path)
+        while _should_wait(state, after_revision) and time.monotonic() < deadline:
+            await anyio.sleep(min(POLL_SECONDS, max(0.01, deadline - time.monotonic())))
+            state = await anyio.to_thread.run_sync(_read_json, state_path)
+        return await anyio.to_thread.run_sync(
+            functools.partial(_compact_job, job_dir, state, include_result=include_result)
+        )
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         job_dir = self._find_job_dir(job_id)
         state_path = job_dir / "state.json"
-        state = _read_json(state_path)
-        if state.get("status") in TERMINAL_STATUSES:
-            return _compact_job(job_dir, state, include_result=False)
+        with _state_lock(state_path):
+            state = _read_json(state_path)
+            if state.get("status") in TERMINAL_STATUSES:
+                return _compact_job(job_dir, state, include_result=False)
+            state = _apply_state(
+                state_path,
+                state,
+                status="cancelled",
+                message="Cancellation recorded; termination of the worker process tree was requested.",
+            )
+        # Recorded before termination, so a finishing worker can no longer
+        # publish a verdict; its output is retained as late_result.json instead.
         pid_path = job_dir / "pid.json"
-        pid_payload = _read_json(pid_path) if pid_path.is_file() else {}
-        pid = int(pid_payload.get("pid") or 0)
-        if pid > 0:
-            try:
-                if os.name == "nt":
-                    subprocess.run(
-                        ["taskkill", "/PID", str(pid), "/T", "/F"],
-                        capture_output=True,
-                        check=False,
-                    )
-                else:
-                    os.killpg(pid, signal.SIGTERM)
-            except OSError:
-                pass
-        state.update(
-            {
-                "status": "cancelled",
-                "revision": int(state.get("revision") or 0) + 1,
-                "updated_at": _now(),
-            }
-        )
-        _write_json(state_path, state)
-        return _compact_job(job_dir, state, include_result=False)
+        pid = int((_read_json(pid_path) if pid_path.is_file() else {}).get("pid") or 0)
+        signalled = terminate_process_tree(pid, grace_seconds=3.0) if pid > 0 else False
+        payload = _compact_job(job_dir, state, include_result=False)
+        payload["termination_signalled"] = signalled
+        return payload
 
     def _find_job_dir(self, job_id: str) -> Path:
         if not job_id.startswith("job_") or any(value in job_id for value in ("/", "\\", "..")):
@@ -214,14 +232,58 @@ class JobStore:
 
 
 def update_state(state_path: Path, **changes: Any) -> dict[str, Any]:
-    state = _read_json(state_path)
-    if state.get("status") == "cancelled" and changes.get("status") != "cancelled":
-        return state
-    state.update(changes)
-    state["revision"] = int(state.get("revision") or 0) + 1
-    state["updated_at"] = _now()
-    _write_json(state_path, state)
-    return state
+    """Apply a non-final transition; terminal states (including cancelled) are final."""
+    with _state_lock(state_path):
+        state = _read_json(state_path)
+        if state.get("status") in TERMINAL_STATUSES:
+            return state
+        return _apply_state(state_path, state, **changes)
+
+
+def finalize_job(state_path: Path, result_path: Path, result: dict[str, Any], **state_changes: Any) -> dict[str, Any]:
+    """Publish a worker result and its terminal status atomically with respect to cancel."""
+    status = result.get("status") if isinstance(result, dict) else None
+    with _state_lock(state_path):
+        state = _read_json(state_path)
+        if state.get("status") in TERMINAL_STATUSES:
+            # Typically cancelled while the solver finished: keep the evidence,
+            # never the verdict.
+            _write_json(result_path.with_name("late_result.json"), result)
+            return state
+        if not isinstance(status, str) or status not in TERMINAL_STATUSES - {"cancelled"}:
+            _write_json(result_path.with_name("invalid_result.json"), result if isinstance(result, dict) else {"result": repr(result)})
+            return _apply_state(
+                state_path,
+                state,
+                status="worker_failed",
+                message=f"Worker produced a result without a valid terminal status: {status!r}.",
+            )
+        _write_json(result_path, result)
+        return _apply_state(state_path, state, status=status, result_path=str(result_path), **state_changes)
+
+
+def _apply_state(state_path: Path, state: dict[str, Any], **changes: Any) -> dict[str, Any]:
+    updated = {**state, **changes}
+    updated["revision"] = int(state.get("revision") or 0) + 1
+    updated["updated_at"] = _now()
+    _write_json(state_path, updated)
+    return updated
+
+
+def _state_lock(state_path: Path):
+    return exclusive_file_lock(state_path.with_name("state.lock"), timeout=STATE_LOCK_TIMEOUT_SECONDS)
+
+
+def _bounded_wait(wait_seconds: Any) -> float:
+    try:
+        value = float(wait_seconds)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(value, MAX_WAIT_SECONDS)) if value == value else 0.0
+
+
+def _should_wait(state: dict[str, Any], after_revision: int) -> bool:
+    return int(state.get("revision") or 0) <= int(after_revision) and state.get("status") not in TERMINAL_STATUSES
 
 
 def _compact_job(job_dir: Path, state: dict[str, Any], *, include_result: bool) -> dict[str, Any]:
@@ -268,6 +330,8 @@ def _compact_job(job_dir: Path, state: dict[str, Any], *, include_result: bool) 
                 "result_path": str(result_path),
             }
         )
+        if result.get("backend"):
+            payload["backend"] = result["backend"]
         if result.get("provenance"):
             payload["provenance"] = compact_provenance(result["provenance"])
         from ..tools.model_tools import compact, compact_inspection
@@ -282,6 +346,9 @@ def _compact_job(job_dir: Path, state: dict[str, Any], *, include_result: bool) 
                     payload[name] = compact(output[name])
         if include_result:
             payload["result"] = result
+    late_result_path = job_dir / "late_result.json"
+    if late_result_path.is_file():
+        payload["late_result_path"] = str(late_result_path)
     return payload
 
 
@@ -293,7 +360,7 @@ def _make_job_id(model_profile_id: str, problem_id: str) -> str:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(_retry_sharing_violation(lambda: path.read_text(encoding="utf-8")))
     if not isinstance(payload, dict):
         raise ValueError(f"Expected JSON object: {path}")
     return payload
@@ -301,9 +368,27 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
+    temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex[:12]}.tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    try:
+        _retry_sharing_violation(lambda: os.replace(temporary, path))
+    except BaseException:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _retry_sharing_violation(operation: Callable[[], Any]) -> Any:
+    for attempt in range(SHARING_RETRY_ATTEMPTS):
+        try:
+            return operation()
+        except PermissionError:
+            if attempt == SHARING_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(SHARING_RETRY_DELAY_SECONDS)
+    raise AssertionError("unreachable")
 
 
 def _now() -> str:

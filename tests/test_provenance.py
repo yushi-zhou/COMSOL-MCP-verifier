@@ -1,3 +1,4 @@
+import asyncio
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -70,7 +71,11 @@ def test_start_rejects_stale_contract_before_launch(package, monkeypatch):
 def test_public_contract_reload_and_plugin_source_reload(package):
     root, _, _, _ = package
     server = create_server()
-    inspect = server._tool_manager._tools["inspect_contract"].fn
+    tool = server._tool_manager._tools["inspect_contract"].fn
+
+    def inspect(*args):
+        return asyncio.run(tool(*args))
+
     first = inspect("generic_mock_profile", "generic_mock_problem")
     assert first["provenance"]["contract_hash"] == first["contract_hash"]
     problem_path = root / "problems" / "generic_mock_problem.example.yaml"
@@ -90,7 +95,11 @@ def test_public_contract_reload_and_plugin_source_reload(package):
 def test_running_server_discovers_new_external_profile_without_restart(package):
     root, _, _, _ = package
     server = create_server()
-    discover = server._tool_manager._tools["discover_designs"].fn
+    tool = server._tool_manager._tools["discover_designs"].fn
+
+    def discover(query):
+        return asyncio.run(tool(query))
+
     assert discover("new_registered_design")["count"] == 0
     profile = yaml.safe_load((root / "profiles/generic_mock_profile.example.yaml").read_text())
     profile["model_profile_id"] = "new_registered_design"

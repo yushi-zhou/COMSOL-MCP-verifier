@@ -14,6 +14,7 @@ from ..registries.plugin_registry import PluginRegistry
 from ..runs.result_summary import write_result_summary
 from ..utils.contract_metadata import build_contract_metadata
 from ..utils.paths import configured_run_root, project_path, resolve_package_path
+from ..utils.process_tree import run_process_tree
 from ..schemas.model_observation import selected_measurements, validate_topics
 from ..validation.physics_preflight import check_topics, run_preflight
 from .base import BackendConfigurationError, BackendExecutionError
@@ -32,7 +33,9 @@ class MatlabLiveLinkBackend:
         timeout_seconds: int = 3600,
         parser_registry: PluginRegistry | None = None,
     ) -> None:
-        self._subprocess_runner = subprocess_runner or subprocess.run
+        # The default runner terminates MATLAB's whole process tree on timeout;
+        # plain subprocess.run would leave the real MATLAB process running.
+        self._subprocess_runner = subprocess_runner or run_process_tree
         self._matlab_executable = matlab_executable
         self._timeout_seconds = timeout_seconds
         self._parser_registry = parser_registry or PluginRegistry()
@@ -85,6 +88,8 @@ class MatlabLiveLinkBackend:
         simulation_output = self._simulation_output_from_payload(output_payload, problem_spec, model_profile)
         _validate_measurement_ids(simulation_output.get("measurements"), payload["measurements"])
         simulation_output["preflight"] = preflight
+        # Interim evidence only: verification has not run yet. The final status
+        # replaces this summary once the verifier result is known.
         write_result_summary(
             run_dir=run_dir,
             run_id=run_id,
@@ -92,7 +97,7 @@ class MatlabLiveLinkBackend:
             model_profile_id=str(model_profile.get("model_profile_id") or ""),
             problem_id=str(problem_spec.get("problem_id") or ""),
             candidate=candidate,
-            status="evaluated",
+            status="simulation_completed",
             simulation_output=simulation_output,
             contract_metadata=build_contract_metadata(model_profile, problem_spec),
         )
@@ -136,7 +141,10 @@ class MatlabLiveLinkBackend:
     def _resolve_timeout_seconds(self, model_profile: dict[str, Any], problem_spec: dict[str, Any]) -> int:
         for source in (model_profile.get("execution_policy"), problem_spec.get("execution_policy")):
             if isinstance(source, dict) and "backend_timeout_seconds" in source:
-                return int(resolve_execution_policy(model_profile, problem_spec)["backend_timeout_seconds"])
+                try:
+                    return int(resolve_execution_policy(model_profile, problem_spec)["backend_timeout_seconds"])
+                except ValueError as exc:
+                    raise BackendConfigurationError(str(exc)) from exc
         return self._timeout_seconds
 
     def _resolve_config(self, model_profile: dict[str, Any]) -> dict[str, Any]:
@@ -285,7 +293,12 @@ class MatlabLiveLinkBackend:
             ) from exc
         if not isinstance(payload, dict):
             raise BackendExecutionError("MATLAB LiveLink output JSON must be an object.", failure_category="result_parse_error")
-        status = str(payload.get("status", "ok"))
+        if "status" not in payload:
+            raise BackendExecutionError(
+                "MATLAB LiveLink output JSON has no status; refusing to treat it as a successful run.",
+                failure_category="result_parse_error",
+            )
+        status = str(payload.get("status"))
         if status not in {"ok", "evaluated"}:
             errors = _as_string_list(payload.get("errors"))
             message = "; ".join(errors) if errors else f"MATLAB LiveLink returned status {status!r}."
