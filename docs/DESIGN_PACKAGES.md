@@ -68,7 +68,10 @@ Before agent use:
    Test reconstruction before claiming the source reproduces the saved model.
 2. Verify each declared tag in the exported source and saved model.
 3. Make the output table deterministic and declare its column mapping.
-4. Add schema constraints and a real-run cost policy.
+4. Add schema constraints and a real-run cost policy. Real runs need an explicit
+   `execution_policy.allow_real_backend: true`; bound declared sweeps with
+   `max_sweep_points`. Bind every candidate field in `model_bindings`, or list
+   fields used only by the parser/verifier in `model_bindings.unapplied_fields`.
 5. Test one known-good and one known-bad candidate.
 6. Bind named measurements and preflight expectations to observed model facts;
    declare additional calibration/source dependencies in `provenance_files`.

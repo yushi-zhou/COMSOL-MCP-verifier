@@ -430,10 +430,12 @@ parsed = struct('spectral_response', spectral_response, 'summary_metrics', summa
 end
 
 function values = resolve_sweep_values(request, sweep)
+from_candidate = false;
 if isfield(sweep, 'values')
     raw_values = sweep.values;
 else
     values_from = char(require_binding(sweep, 'values_from'));
+    from_candidate = startsWith(values_from, 'candidate.');
     [found, raw_values] = resolve_dotted_path(request, values_from);
     if ~found
         error('Sweep values_from path could not be resolved: %s', values_from);
@@ -442,6 +444,11 @@ end
 values = coerce_sweep_values(raw_values);
 if isempty(values)
     error('Values sweep resolved no values.');
+end
+% Candidate text would reach COMSOL as an expression (e.g. range(...)) whose
+% size the Python cost gate cannot bound; accept only finite numbers.
+if from_candidate && ~all(cellfun(@(v) isnumeric(v) && isscalar(v) && isfinite(v), values))
+    error('em:sweep_values', 'Candidate-provided sweep values must be finite numbers.');
 end
 end
 

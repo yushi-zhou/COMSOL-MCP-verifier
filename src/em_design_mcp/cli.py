@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -18,6 +19,7 @@ from .tools.candidate_tools import (
     validate_candidate_payload,
 )
 from .utils.dotenv import load_project_dotenv
+from .utils.file_lock import comsol_execution_slot
 from .validation.schema_validation import deep_merge_schema
 
 
@@ -126,7 +128,10 @@ def _dispatch_tool(tool: str, request: dict[str, Any]) -> dict[str, Any]:
     if tool == "evaluate_candidate":
         candidate = _require_candidate(request)
         backend = _require_string(request, "backend")
-        return evaluate_candidate_payload(model_profile_id, problem_id, candidate, backend, model_profiles, problems, verifiers)
+        # Share the per-server queue with MCP workers so solves never overlap.
+        slot = comsol_execution_slot() if backend == "matlab_livelink" else contextlib.nullcontext()
+        with slot:
+            return evaluate_candidate_payload(model_profile_id, problem_id, candidate, backend, model_profiles, problems, verifiers)
 
     raise _CliError(f"Unknown tool: {tool}")
 

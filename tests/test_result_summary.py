@@ -114,11 +114,13 @@ def test_backend_failure_writes_final_result_summary(tmp_path: Path, monkeypatch
     verifiers = VerifierRegistry()
     candidate = {"width_nm": 80, "gap_nm": 10, "length_um": 2.5}
 
+    # The backend must match the profile's declared type, so exercise the
+    # failure path through the mock profile's own backend.
     result = evaluate_candidate_payload(
         "generic_mock_profile",
         "generic_mock_problem",
         candidate,
-        "matlab_livelink",
+        "mock",
         model_profiles,
         problems,
         verifiers,

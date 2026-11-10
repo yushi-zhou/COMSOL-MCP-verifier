@@ -93,6 +93,8 @@ Use the returned error category and artifact paths for diagnosis:
 | `stale_provenance` | Changed model, contract, plugin or declared evidence; re-inspect before rerunning |
 | Dataset/unit/measurement failure | Actual dataset-to-solution binding, saved samples, selection and native units |
 | Job remains `running` after worker exits | Inspect local processes and artifacts; automatic dead-worker reconciliation is not implemented |
+| Job stays `queued` | Another job holds the COMSOL server lock for this `COMSOL_SERVER_PORT`; it starts when that job ends or is cancelled |
+| Real run rejected by policy | Declare `execution_policy.allow_real_backend: true`; policy keys and values are checked strictly |
 
 Cancellation and timeouts do not guarantee that a separately running COMSOL
 server has stopped computing. See [job lifecycle limits](ARCHITECTURE.md#local-job-lifecycle).

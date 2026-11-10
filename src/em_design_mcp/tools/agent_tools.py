@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from typing import Any
+import functools
+from typing import Any, Callable
 
+import anyio
 from mcp.types import ToolAnnotations
 
 from ..registries.model_profile_registry import ModelProfileRegistry
@@ -23,6 +25,9 @@ def register_agent_tools(
     problems: ProblemSpecRegistry,
     verifiers: VerifierRegistry,
 ) -> None:
+    # FastMCP calls synchronous tools on its event loop. Every tool is therefore
+    # async: file I/O, hashing and plugin loading run in worker threads, and
+    # long-polls sleep cooperatively, so one wait never stalls other requests.
     def current():
         # Each request sees the current package manifests and contracts. Workers
         # validate their recorded fingerprint again before using these files.
@@ -32,12 +37,7 @@ def register_agent_tools(
         return (active_packages, active_profiles, active_problems,
                 VerifierRegistry(active_packages), JobStore(active_packages, active_profiles))
 
-    @server.tool(
-        name="discover_designs",
-        description="List compact model/problem pairs. Call once before selecting a contract.",
-        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
-    )
-    def discover_designs(query: str = "") -> dict[str, Any]:
+    def discover(query: str) -> dict[str, Any]:
         packages, profiles, problems, _, _ = current()
         needle = query.strip().lower()
         problem_index = {item["problem_id"]: item for item in problems.list_specs()}
@@ -61,12 +61,7 @@ def register_agent_tools(
                 designs.append(row)
         return {"packages": packages.summary(), "designs": designs, "count": len(designs)}
 
-    @server.tool(
-        name="inspect_contract",
-        description="Return the candidate schema, allowed ranges, objectives, outputs, verifier, and immutable contract hash for one design task.",
-        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
-    )
-    def inspect_contract(model_profile_id: str, problem_id: str) -> dict[str, Any]:
+    def contract(model_profile_id: str, problem_id: str) -> dict[str, Any]:
         _, profiles, problems, verifiers, _ = current()
         bundle = get_contract_bundle_payload(model_profile_id, problem_id, profiles, problems, verifiers)
         profile = profiles.as_dict(model_profile_id)
@@ -79,41 +74,7 @@ def register_agent_tools(
         }
         return bundle
 
-    @server.tool(
-        name="inspect_model",
-        description=(
-            "Read actual COMSOL facts by topic: studies (including solutions/datasets), physics, "
-            "excitation, periodic, materials, selections, mesh, outputs. Optionally evaluate package-owned "
-            "measurement_ids. No solve or model edits. source_job_id selects a verified saved run artifact; "
-            "otherwise saved-solution freshness is unknown. Uses the existing persistent job/wait workflow."
-        ),
-        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=False),
-    )
-    def inspect_model(
-        model_profile_id: str,
-        topics: list[str] | None = None,
-        measurement_ids: list[str] | None = None,
-        problem_id: str | None = None,
-        source_job_id: str | None = None,
-        wait_seconds: float = 20.0,
-    ) -> dict[str, Any]:
-        _, _, _, _, jobs = current()
-        return jobs.start_inspection(
-            model_profile_id=model_profile_id, problem_id=problem_id, topics=topics,
-            measurement_ids=measurement_ids, source_job_id=source_job_id, wait_seconds=wait_seconds,
-        )
-
-    @server.tool(
-        name="prepare_run",
-        description="Validate a candidate and estimate real-solver cost without starting COMSOL.",
-        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
-    )
-    def prepare_run(
-        model_profile_id: str,
-        problem_id: str,
-        candidate: dict[str, Any],
-        backend: str = "matlab_livelink",
-    ) -> dict[str, Any]:
+    def prepare(model_profile_id: str, problem_id: str, candidate: dict[str, Any], backend: str) -> dict[str, Any]:
         packages, profiles, problems, verifiers, _ = current()
         estimate = estimate_candidate_cost_payload(
             model_profile_id, problem_id, candidate, backend, profiles, problems, verifiers
@@ -133,11 +94,66 @@ def register_agent_tools(
         }
 
     @server.tool(
+        name="discover_designs",
+        description="List compact model/problem pairs. Call once before selecting a contract.",
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    async def discover_designs(query: str = "") -> dict[str, Any]:
+        return await _in_thread(discover, query)
+
+    @server.tool(
+        name="inspect_contract",
+        description="Return the candidate schema, allowed ranges, objectives, outputs, verifier, and immutable contract hash for one design task.",
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    async def inspect_contract(model_profile_id: str, problem_id: str) -> dict[str, Any]:
+        return await _in_thread(contract, model_profile_id, problem_id)
+
+    @server.tool(
+        name="inspect_model",
+        description=(
+            "Read actual COMSOL facts by topic: studies (including solutions/datasets), physics, "
+            "excitation, periodic, materials, selections, mesh, outputs. Optionally evaluate package-owned "
+            "measurement_ids. No solve or model edits. source_job_id selects a verified saved run artifact; "
+            "otherwise saved-solution freshness is unknown. Uses the existing persistent job/wait workflow."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=False),
+    )
+    async def inspect_model(
+        model_profile_id: str,
+        topics: list[str] | None = None,
+        measurement_ids: list[str] | None = None,
+        problem_id: str | None = None,
+        source_job_id: str | None = None,
+        wait_seconds: float = 20.0,
+    ) -> dict[str, Any]:
+        jobs = current()[4]
+        started = await _in_thread(
+            jobs.start_inspection,
+            model_profile_id=model_profile_id, problem_id=problem_id, topics=topics,
+            measurement_ids=measurement_ids, source_job_id=source_job_id, wait_seconds=0,
+        )
+        return await _follow(jobs, started, wait_seconds)
+
+    @server.tool(
+        name="prepare_run",
+        description="Validate a candidate and estimate real-solver cost without starting COMSOL.",
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    async def prepare_run(
+        model_profile_id: str,
+        problem_id: str,
+        candidate: dict[str, Any],
+        backend: str = "matlab_livelink",
+    ) -> dict[str, Any]:
+        return await _in_thread(prepare, model_profile_id, problem_id, candidate, backend)
+
+    @server.tool(
         name="start_run",
         description="Start a persistent simulation worker and wait server-side for a quick result. Use the returned revision with get_run if still running.",
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False),
     )
-    def start_run(
+    async def start_run(
         model_profile_id: str,
         problem_id: str,
         candidate: dict[str, Any],
@@ -145,32 +161,33 @@ def register_agent_tools(
         wait_seconds: float = 20.0,
         provenance_id: str | None = None,
     ) -> dict[str, Any]:
-        prepared = prepare_run(model_profile_id, problem_id, candidate, backend)
+        prepared = await _in_thread(prepare, model_profile_id, problem_id, candidate, backend)
         if not prepared["valid"]:
             return {"status": "validation_failed", "terminal": True, **prepared}
-        _, _, _, _, jobs = current()
-        return jobs.start(
+        jobs = current()[4]
+        started = await _in_thread(
+            jobs.start,
             model_profile_id=model_profile_id,
             problem_id=problem_id,
             candidate=prepared["normalized_candidate"],
             backend=backend,
-            wait_seconds=wait_seconds,
+            wait_seconds=0,
             expected_provenance=provenance_id or prepared["provenance"]["id"],
         )
+        return await _follow(jobs, started, wait_seconds)
 
     @server.tool(
         name="get_run",
         description="Long-poll one job by revision. Defaults to a compact result; request include_result only when full arrays are needed.",
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
     )
-    def get_run(
+    async def get_run(
         job_id: str,
         after_revision: int = 0,
         wait_seconds: float = 30.0,
         include_result: bool = False,
     ) -> dict[str, Any]:
-        _, _, _, _, jobs = current()
-        return jobs.get(
+        return await current()[4].wait(
             job_id,
             wait_seconds=wait_seconds,
             after_revision=after_revision,
@@ -182,6 +199,19 @@ def register_agent_tools(
         description="Request best-effort termination of the recorded worker process tree for one active job.",
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False),
     )
-    def cancel_run(job_id: str) -> dict[str, Any]:
-        _, _, _, _, jobs = current()
-        return jobs.cancel(job_id)
+    async def cancel_run(job_id: str) -> dict[str, Any]:
+        return await _in_thread(current()[4].cancel, job_id)
+
+
+async def _in_thread(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    return await anyio.to_thread.run_sync(functools.partial(function, *args, **kwargs))
+
+
+async def _follow(jobs: JobStore, started: dict[str, Any], wait_seconds: float) -> dict[str, Any]:
+    if started.get("terminal"):
+        return started
+    return await jobs.wait(
+        str(started["job_id"]),
+        wait_seconds=wait_seconds,
+        after_revision=int(started.get("revision") or 0),
+    )

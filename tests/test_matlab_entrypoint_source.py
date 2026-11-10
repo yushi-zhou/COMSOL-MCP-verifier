@@ -12,6 +12,13 @@ def test_matlab_entrypoint_uses_generic_values_from_dotted_path_resolver() -> No
     assert "format_comsol_value(numeric_value, unit)" in text
 
 
+def test_matlab_entrypoint_rejects_candidate_sweep_expressions() -> None:
+    text = (Path(__file__).resolve().parents[1] / "matlab" / "run_em_design_from_json.m").read_text(encoding="utf-8")
+
+    assert "from_candidate = startsWith(values_from, 'candidate.');" in text
+    assert "Candidate-provided sweep values must be finite numbers." in text
+
+
 def test_matlab_entrypoint_leaves_table_parsing_to_python_backend() -> None:
     text = (Path(__file__).resolve().parents[1] / "matlab" / "run_em_design_from_json.m").read_text(encoding="utf-8")
     runtime_body = text.split("function apply_parameter_bindings", maxsplit=1)[0]

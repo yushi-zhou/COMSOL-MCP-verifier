@@ -45,7 +45,7 @@ parameter ranges, objectives, calibration data, parsers, and verifiers live in
 | Deterministic preflight | Small checks against actual facts; unsupported checks and unavailable required facts fail explicitly |
 | Named measurements | Package-owned expressions bound to study, solution, dataset, unit, selection, and optional normalization |
 | Provenance | Content fingerprints of the model, active contracts, adapters, plugins, and declared evidence; changed inputs reject stale reuse |
-| Persistent local jobs | Independent worker subprocesses, disk-backed state, revision-aware waits, retained failures, and compact results |
+| Persistent local jobs | Independent worker subprocesses, disk-backed state, non-blocking revision-aware waits, one solve at a time per local COMSOL server, retained failures, and compact results |
 | Verifier feedback | Package-defined metrics, margins, limiting constraints, and explanations for the next engineering decision |
 
 There is no MCP tool for arbitrary MATLAB, Java, Python, shell, or COMSOL commands.
@@ -179,11 +179,13 @@ external design packages.
 - Saved model identity does not establish solution freshness. Execution receipts
   cover only the named measurement solutions explicitly recomputed by a run;
   arbitrary saved solutions and legacy table-only outputs remain unverified.
-- Candidate validation supports a documented schema subset. Cost gates use
-  declared sweep counts, not predictions of memory or solve time.
+- Candidate validation supports a documented schema subset and rejects keywords
+  it cannot enforce. Real runs need an explicit `allow_real_backend: true`. Cost
+  gates use declared sweep counts, not predictions of memory or solve time.
 - Jobs are local subprocesses with retained files, not checkpoint/restart or
-  scheduling infrastructure. Cancellation cannot guarantee interruption of work
-  already running on a separately hosted COMSOL server.
+  scheduling infrastructure beyond a per-server queue. Cancellation cannot
+  guarantee interruption of work already running on a separately hosted COMSOL
+  server.
 - Source installation and trusted local use are the supported deployment model.
   Version support is a workflow target, not universal COMSOL API/module coverage.
 
